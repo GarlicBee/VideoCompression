@@ -1,0 +1,20 @@
+{
+  "algorithm_name": "VP9 Fast Compression",
+  "algorithm_type": "fast_codec",
+  "description": "VP9 compression optimized for speed, much faster alternative to AV1",
+  "parameters": {
+    "speed": 2,
+    "crf": 30, 
+    "threads": 0,
+    "tile_columns": 2,
+    "row_mt": 1
+  },
+  "audio": {
+    "codec": "libopus",
+    "bitrate": "128k",
+    "sample_rate": 48000
+  },
+  "output_format": "webm",
+  "expected_compression_ratio": 8.0,
+  "encoding_speed": "fast"
+}

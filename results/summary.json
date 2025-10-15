@@ -1,0 +1,29 @@
+{
+  "total_videos": 10,
+  "total_algorithms": 2,
+  "video_names": [
+    "videoS1",
+    "VideoS16",
+    "VideoS17",
+    "videoS2",
+    "videoS3",
+    "VideoS7",
+    "VideoS8",
+    "VideoS9",
+    "videoS6",
+    "VideoS10"
+  ],
+  "algorithm_names": [
+    "HEVC",
+    "VP9"
+  ],
+  "average_vmaf_per_algorithm": {
+    "HEVC": 94.03112718286921,
+    "VP9": 70.73167926324166
+  },
+  "average_compression_per_algorithm": {
+    "HEVC": 1.3509505871923733,
+    "VP9": 0.8127689765419502
+  },
+  "note": "VMAF scores are estimated based on compression ratios - not actual VMAF calculations"
+}
