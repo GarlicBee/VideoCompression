@@ -27,6 +27,14 @@
     "sample_rate": 44100,
     "channels": 2
   },
+  "optimization_params": {
+  "vmaf_threshold": 85,
+  "w_c": 0.8,
+  "w_vmaf": 0.2,
+  "crf_min": 28,
+  "crf_max": 34,
+  "crf_step": 2
+  },
   "quality_settings": {
     "high_quality": {
       "preset": "slow",

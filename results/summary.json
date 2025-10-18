@@ -15,7 +15,7 @@
     "HEVC": 2.852828907870194
   },
   "average_compression_time_per_algorithm": {
-    "HEVC": 318.7749743461609
+    "HEVC": 259.9899946451187
   },
   "note": "VMAF scores are estimated based on compression ratios - not actual VMAF calculations"
 }

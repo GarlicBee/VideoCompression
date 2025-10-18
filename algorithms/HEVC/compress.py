@@ -313,21 +313,22 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Dict, Any, Tuple, List
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# SF Optimization Constants
-VMAF_THRESHOLD = 85
-W_C = 0.8
-W_VMAF = 0.2
-CRF_MIN = 28
-CRF_MAX = 34
-CRF_STEP = 2  # Step size for CRF values (28, 30, 32, 34)
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 class H265Compressor:
     def __init__(self, config_file: str = "config.json"):
         """Initialize H.265 compressor with configuration."""
         self.config = self._load_config(config_file)
         self.start_time = None
+
+        # Load optimization parameters from config
+        opt_params = self.config.get('optimization_params', {})
+        self.vmaf_threshold = opt_params.get('vmaf_threshold', 85)
+        self.w_c = opt_params.get('w_c', 0.8)
+        self.w_vmaf = opt_params.get('w_vmaf', 0.2)
+        self.crf_min = opt_params.get('crf_min', 28)
+        self.crf_max = opt_params.get('crf_max', 34)
+        self.crf_step = opt_params.get('crf_step', 2)
 
     def _load_config(self, config_file: str) -> Dict[str, Any]:
         """Load algorithm configuration from JSON file."""
@@ -350,6 +351,14 @@ class H265Compressor:
                 "codec": "aac",
                 "bitrate": "128k",
                 "sample_rate": 44100
+            },
+            "optimization_params": {
+                "vmaf_threshold": 85,
+                "w_c": 0.8,
+                "w_vmaf": 0.2,
+                "crf_min": 28,
+                "crf_max": 34,
+                "crf_step": 2
             }
         }
 
@@ -357,8 +366,12 @@ class H265Compressor:
             try:
                 with open(config_path, 'r') as f:
                     loaded_config = json.load(f)
-                # Merge with defaults
-                default_config.update(loaded_config)
+                # Merge with defaults (including nested dicts)
+                for key, value in loaded_config.items():
+                    if isinstance(value, dict) and key in default_config:
+                        default_config[key].update(value)
+                    else:
+                        default_config[key] = value
                 return default_config
             except (json.JSONDecodeError, IOError) as e:
                 print(f"Warning: Error loading config file: {e}")
@@ -552,7 +565,7 @@ def compute_vmaf(original: str, compressed: str) -> float:
         return None
 
 
-def calculate_sf(c: float, vmaf: float) -> float:
+def calculate_sf(c: float, vmaf: float, w_c: float, w_vmaf: float, vmaf_threshold: float) -> float:
     """
     Calculate SF (Score Function) for optimization.
 
@@ -561,6 +574,9 @@ def calculate_sf(c: float, vmaf: float) -> float:
     Args:
         c: Compression ratio (compressed_size / original_size)
         vmaf: VMAF score (0-100)
+        w_c: Weight for compression component
+        w_vmaf: Weight for VMAF component
+        vmaf_threshold: VMAF threshold value
 
     Returns:
         SF score
@@ -568,56 +584,14 @@ def calculate_sf(c: float, vmaf: float) -> float:
     if vmaf is None:
         return -float('inf')  # Invalid score for failed VMAF
 
-    sf = W_C * (1 - c**1.5) + W_VMAF * ((vmaf - VMAF_THRESHOLD) / (100 - VMAF_THRESHOLD))
+    sf = w_c * (1 - c**1.5) + w_vmaf * ((vmaf - vmaf_threshold) / (100 - vmaf_threshold))
     return sf
-
-
-def evaluate_quality(input_video: str, compressed_video: str, orig_size: int) -> Dict[str, Any]:
-    """
-    Evaluate quality metrics for a compressed video.
-
-    Args:
-        input_video: Path to original video
-        compressed_video: Path to compressed video
-        orig_size: Original video size in bytes
-
-    Returns:
-        Dictionary with c, vmaf, and sf values
-    """
-    try:
-        output_size = os.path.getsize(compressed_video)
-        c = output_size / orig_size
-
-        print(f"[EVAL] Computing VMAF for CRF candidate...")
-        vmaf = compute_vmaf(input_video, compressed_video)
-
-        if vmaf is None:
-            print(f"[EVAL] VMAF computation failed, using fallback")
-            sf = -float('inf')
-        else:
-            sf = calculate_sf(c, vmaf)
-            print(f"[EVAL] c={c:.4f}, VMAF={vmaf:.2f}, SF={sf:.4f}")
-
-        return {
-            'c': c,
-            'vmaf': vmaf,
-            'sf': sf,
-            'size': output_size
-        }
-    except Exception as e:
-        print(f"[ERROR] Quality evaluation failed: {e}")
-        return {
-            'c': 1.0,
-            'vmaf': None,
-            'sf': -float('inf'),
-            'size': 0
-        }
 
 
 def compress_with_crf(input_video: str, crf: int, compressor: H265Compressor, 
                       output_base: str, orig_size: int) -> Dict[str, Any]:
     """
-    Compress video with a specific CRF value and evaluate quality.
+    Compress video with a specific CRF value.
 
     Args:
         input_video: Path to input video
@@ -627,7 +601,7 @@ def compress_with_crf(input_video: str, crf: int, compressor: H265Compressor,
         orig_size: Original video size in bytes
 
     Returns:
-        Dictionary with crf, output path, and quality metrics
+        Dictionary with crf, output path, and compression info
     """
     print(f"\n[CRF {crf}] Starting compression...")
 
@@ -657,20 +631,23 @@ def compress_with_crf(input_video: str, crf: int, compressor: H265Compressor,
                 'crf': crf,
                 'output': temp_output,
                 'success': False,
-                'sf': -float('inf'),
                 'compression_time': compression_time
             }
 
-        print(f"[CRF {crf}] Compression completed in {compression_time:.1f}s")
+        # Get compressed file size
+        output_size = os.path.getsize(temp_output)
+        c = output_size / orig_size
 
-        # Evaluate quality
-        metrics = evaluate_quality(input_video, temp_output, orig_size)
-        metrics['crf'] = crf
-        metrics['output'] = temp_output
-        metrics['success'] = True
-        metrics['compression_time'] = compression_time
+        print(f"[CRF {crf}] Compression completed in {compression_time:.1f}s, c={c:.4f}")
 
-        return metrics
+        return {
+            'crf': crf,
+            'output': temp_output,
+            'success': True,
+            'compression_time': compression_time,
+            'c': c,
+            'size': output_size
+        }
 
     except subprocess.TimeoutExpired:
         print(f"[CRF {crf}] Compression timed out")
@@ -678,7 +655,6 @@ def compress_with_crf(input_video: str, crf: int, compressor: H265Compressor,
             'crf': crf,
             'output': temp_output,
             'success': False,
-            'sf': -float('inf'),
             'compression_time': 0
         }
     except Exception as e:
@@ -687,16 +663,56 @@ def compress_with_crf(input_video: str, crf: int, compressor: H265Compressor,
             'crf': crf,
             'output': temp_output,
             'success': False,
-            'sf': -float('inf'),
             'compression_time': 0
         }
+
+
+def compute_vmaf_for_result(input_video: str, result: Dict[str, Any], 
+                            w_c: float, w_vmaf: float, vmaf_threshold: float) -> Dict[str, Any]:
+    """
+    Compute VMAF and SF for a compressed video result.
+
+    Args:
+        input_video: Path to original video
+        result: Dictionary with compression result info
+        w_c: Weight for compression component
+        w_vmaf: Weight for VMAF component
+        vmaf_threshold: VMAF threshold value
+
+    Returns:
+        Updated result dictionary with VMAF and SF
+    """
+    if not result.get('success', False):
+        result['vmaf'] = None
+        result['sf'] = -float('inf')
+        return result
+
+    crf = result['crf']
+    compressed_video = result['output']
+    c = result['c']
+
+    print(f"[CRF {crf}] Computing VMAF...")
+    vmaf = compute_vmaf(input_video, compressed_video)
+
+    if vmaf is None:
+        print(f"[CRF {crf}] VMAF computation failed")
+        sf = -float('inf')
+    else:
+        sf = calculate_sf(c, vmaf, w_c, w_vmaf, vmaf_threshold)
+        print(f"[CRF {crf}] VMAF={vmaf:.2f}, SF={sf:.4f}")
+
+    result['vmaf'] = vmaf
+    result['sf'] = sf
+    return result
 
 
 def optimize_crf_parallel(input_video: str, output_video: str, 
                           compressor: H265Compressor) -> Dict[str, Any]:
     """
-    Optimize CRF value using parallel evaluation to maximize SF.
-    Uses step size of 2 (28, 30, 32, 34).
+    Optimize CRF value using parallel compression and VMAF evaluation to maximize SF.
+
+    Phase 1: Compress all CRF values in parallel
+    Phase 2: Compute VMAF for all compressed videos in parallel
 
     Args:
         input_video: Path to input video
@@ -707,19 +723,22 @@ def optimize_crf_parallel(input_video: str, output_video: str,
         Dictionary with best CRF and quality metrics
     """
     print(f"\n{'='*70}")
-    print(f"[OPTIMIZE] Starting CRF optimization (CRF {CRF_MIN}-{CRF_MAX}, step={CRF_STEP})")
+    print(f"[OPTIMIZE] Starting CRF optimization")
+    print(f"[OPTIMIZE] CRF range: {compressor.crf_min}-{compressor.crf_max}, step={compressor.crf_step}")
+    print(f"[OPTIMIZE] SF params: w_c={compressor.w_c}, w_vmaf={compressor.w_vmaf}, VMAF_threshold={compressor.vmaf_threshold}")
     print(f"{'='*70}")
 
     # Get original size
     orig_size = os.path.getsize(input_video)
     print(f"[OPTIMIZE] Original size: {orig_size / (1024*1024):.2f} MB")
 
-    # CRF range to evaluate (28, 30, 32, 34)
-    crf_range = range(CRF_MIN, CRF_MAX + 1, CRF_STEP)
+    # CRF range to evaluate
+    crf_range = range(compressor.crf_min, compressor.crf_max + 1, compressor.crf_step)
     print(f"[OPTIMIZE] Testing CRF values: {list(crf_range)}")
 
-    # Run compressions in parallel
-    results = []
+    # PHASE 1: Compress all CRF values in parallel
+    print(f"\n[PHASE 1] Compressing videos with all CRF values in parallel...")
+    compression_results = []
     with ThreadPoolExecutor(max_workers=len(crf_range)) as executor:
         futures = []
         for crf in crf_range:
@@ -733,19 +752,52 @@ def optimize_crf_parallel(input_video: str, output_video: str,
             )
             futures.append(future)
 
-        # Collect results as they complete
+        # Collect compression results
         for future in as_completed(futures):
             try:
                 result = future.result()
-                results.append(result)
+                compression_results.append(result)
             except Exception as e:
-                print(f"[ERROR] Future failed: {e}")
+                print(f"[ERROR] Compression future failed: {e}")
 
-    # Filter successful results
-    valid_results = [r for r in results if r.get('success', False)]
+    # Filter successful compressions
+    valid_compressions = [r for r in compression_results if r.get('success', False)]
+
+    if not valid_compressions:
+        print(f"[ERROR] No successful compressions!")
+        return None
+
+    print(f"[PHASE 1] Completed {len(valid_compressions)}/{len(crf_range)} compressions successfully")
+
+    # PHASE 2: Compute VMAF for all compressed videos in parallel
+    print(f"\n[PHASE 2] Computing VMAF for all compressed videos in parallel...")
+    final_results = []
+    with ThreadPoolExecutor(max_workers=len(valid_compressions)) as executor:
+        futures = []
+        for result in valid_compressions:
+            future = executor.submit(
+                compute_vmaf_for_result,
+                input_video,
+                result,
+                compressor.w_c,
+                compressor.w_vmaf,
+                compressor.vmaf_threshold
+            )
+            futures.append(future)
+
+        # Collect VMAF results
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                final_results.append(result)
+            except Exception as e:
+                print(f"[ERROR] VMAF future failed: {e}")
+
+    # Filter results with valid VMAF
+    valid_results = [r for r in final_results if r.get('vmaf') is not None]
 
     if not valid_results:
-        print(f"[ERROR] No successful compressions!")
+        print(f"[ERROR] No valid VMAF scores computed!")
         return None
 
     # Find best SF
@@ -779,7 +831,7 @@ def optimize_crf_parallel(input_video: str, output_video: str,
         print(f"[ERROR] Failed to move best result: {e}")
 
     # Clean up other temporary files
-    for result in valid_results:
+    for result in final_results:
         if result != best and os.path.exists(result.get('output', '')):
             try:
                 os.remove(result['output'])
@@ -833,6 +885,8 @@ def main():
 
     except Exception as e:
         print(f"[ERROR] Failed to initialize compressor: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
