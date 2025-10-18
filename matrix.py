@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Video Compression Algorithm Testing Matrix
 Evaluates multiple compression algorithms on multiple videos using VMAF and compression ratios.
@@ -29,6 +28,7 @@ class VideoCompressionMatrix:
         self.algorithms = []
         self.vmaf_matrix = None
         self.compression_matrix = None
+        self.compression_time_matrix = None  # NEW: Store compression times
 
     def _load_config(self, config_file: str) -> Dict[str, Any]:
         """Load configuration from file."""
@@ -110,8 +110,8 @@ class VideoCompressionMatrix:
                 return False
         return True
 
-    def run_algorithm(self, algorithm_path: str, input_video: str, output_video: str) -> bool:
-        """Run a specific algorithm on a video."""
+    def run_algorithm(self, algorithm_path: str, input_video: str, output_video: str) -> Tuple[bool, float]:
+        """Run a specific algorithm on a video. Returns (success, compression_time_seconds)."""
         try:
             # Create output directory if it doesn't exist
             Path(output_video).parent.mkdir(parents=True, exist_ok=True)
@@ -127,152 +127,43 @@ class VideoCompressionMatrix:
             start_time = time.time()
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # 10 minute timeout
             end_time = time.time()
+            compression_time = end_time - start_time  # NEW: Calculate compression time
 
             if result.returncode == 0:
-                logger.info(f"Successfully compressed {Path(input_video).name} using {Path(algorithm_path).name} in {end_time-start_time:.2f}s")
-                return True
+                logger.info(f"Successfully compressed {Path(input_video).name} using {Path(algorithm_path).name} in {compression_time:.2f}s")
+                return True, compression_time  # NEW: Return time
             else:
                 logger.error(f"Algorithm {Path(algorithm_path).name} failed: {result.stderr}")
-                return False
+                return False, 0.0  # NEW: Return 0 for failed compressions
 
         except subprocess.TimeoutExpired:
             logger.error(f"Algorithm {Path(algorithm_path).name} timed out")
-            return False
+            return False, 0.0
         except Exception as e:
             logger.error(f"Error running algorithm {Path(algorithm_path).name}: {e}")
-            return False
-
-
+            return False, 0.0
 
     def calculate_vmaf(self, original_video: str, compressed_video: str) -> float:
         """
-        Robust VMAF runner that tries multiple ways to pass a JSON log path to libvmaf on Windows.
-        Paste-replace only this method. Relies on:
-        - self._parse_vmaf_from_json(json_path)
-        - self._parse_vmaf_from_output(stderr)
-        - self._parse_vmaf_from_csv_output(stderr)
+        Calculate VMAF score using ffmpeg/libvmaf.
+        Robust Linux implementation: always uses absolute paths, runs ffmpeg once, logs errors.
         """
-        import subprocess, tempfile, os, time
+        import subprocess, tempfile, os
         from pathlib import Path
 
-        logger.info("Starting VMAF calculation (robust Windows-aware)")
+        logger.info("Starting VMAF calculation (robust Linux)")
 
-        # resolve input paths
+        # Always use absolute paths
         original = str(Path(original_video).resolve())
         compressed = str(Path(compressed_video).resolve())
 
-        # where to create temp log (create in cwd so we can use a relative path without drive letter)
-        tmp_dir = Path.cwd()
-        tf = tempfile.NamedTemporaryFile(prefix="vmaf_", suffix=".json", dir=str(tmp_dir), delete=False)
-        tf.close()
-        temp_log = Path(tf.name)  # absolute path
-        rel_log = os.path.relpath(temp_log)  # relative path (no drive letter)
-        rel_log_unix = rel_log.replace("\\", "/")  # forward slashes
-        abs_log_unix = str(temp_log).replace("\\", "/")
-        abs_log_escaped_colon = abs_log_unix.replace(":", "\\:")  # C\:/...
-        safe_variants = [
-            ("relative_no_quote", rel_log_unix),                              # vmaf_temp.json or subdir/vmaf_....json
-            ("relative_single_quote", f"'{rel_log_unix}'"),                    # 'rel/path'
-            ("absolute_escape_colon_no_quote", abs_log_escaped_colon),         # C\:/path...
-            ("absolute_single_quote_escaped_colon", f"'{abs_log_escaped_colon}'"),  # 'C\:/path...'
-        ]
-
-        # try filters (prefer libvmaf)
-        filter_name = "libvmaf"
-
-        # helper to run ffmpeg for a given logpath variant and try parse
-        def _try_with_logpath(logpath_str: str) -> float:
-            # build lavfi argument
-            lavfi = f"[0:v][1:v]{filter_name}=log_fmt=json:log_path={logpath_str}"
-            cmd = [
-                "ffmpeg",
-                "-hide_banner",
-                "-y",
-                "-i", original,
-                "-i", compressed,
-                "-lavfi", lavfi,
-                "-f", "null", "-"
-            ]
-            logger.info("[VMAF] Attempt (%s): ffmpeg -lavfi %s", logpath_str, lavfi)
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=600,
-                    check=False
-                )
-            except FileNotFoundError:
-                logger.error("[VMAF] ffmpeg not found in PATH.")
-                return 0.0
-            except subprocess.TimeoutExpired:
-                logger.error("[VMAF] ffmpeg timed out for attempt %s", logpath_str)
-                return 0.0
-            except Exception as e:
-                logger.exception("[VMAF] Unexpected error running ffmpeg: %s", e)
-                return 0.0
-
-            logger.debug("[VMAF] ffmpeg exitcode=%s", proc.returncode)
-            logger.debug("[VMAF] ffmpeg stderr (first 500):\n%s", (proc.stderr or "")[:500])
-            logger.debug("[VMAF] ffmpeg stdout (first 200):\n%s", (proc.stdout or "")[:200])
-
-            # If ffmpeg produced the JSON file, try parsing it (give Windows a moment to flush)
-            try:
-                # prefer the actual absolute file path for reading regardless of what we passed to ffmpeg
-                if temp_log.exists():
-                    time.sleep(0.15)
-                    size = temp_log.stat().st_size
-                    logger.debug("[VMAF] temp log exists size=%d bytes", size)
-                    if size > 10:
-                        try:
-                            score = self._parse_vmaf_from_json(str(temp_log))
-                            if score > 0:
-                                logger.info("[VMAF] Parsed JSON VMAF: %.3f (using %s)", score, logpath_str)
-                                return score
-                        except Exception as e:
-                            logger.debug("[VMAF] JSON parse error: %s", e)
-                    else:
-                        logger.debug("[VMAF] temp log present but empty or tiny (size=%d)", size)
-            except Exception as e:
-                logger.debug("[VMAF] error checking temp log: %s", e)
-
-            # fallback: parse stderr (CSV / textual)
-            try:
-                score_csv = self._parse_vmaf_from_csv_output(proc.stderr or "")
-                if score_csv > 0:
-                    logger.info("[VMAF] Parsed VMAF from CSV stderr: %.3f", score_csv)
-                    return score_csv
-            except Exception as e:
-                logger.debug("[VMAF] CSV parse error: %s", e)
-
-            try:
-                score_txt = self._parse_vmaf_from_output(proc.stderr or "")
-                if score_txt > 0:
-                    logger.info("[VMAF] Parsed VMAF from stderr text: %.3f", score_txt)
-                    return score_txt
-            except Exception as e:
-                logger.debug("[VMAF] stderr text parse error: %s", e)
-
-            return 0.0
+        # Create temp JSON log file with absolute path
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, dir=Path.cwd()) as tf:
+            temp_log = Path(tf.name).resolve()
 
         try:
-            # Attempt variants in order (relative path first avoids drive-colon problems)
-            for name, variant in safe_variants:
-                logger.debug("[VMAF] Trying variant: %s -> %s", name, variant)
-                score = _try_with_logpath(variant)
-                if score > 0:
-                    try:
-                        temp_log.unlink()
-                    except Exception:
-                        pass
-                    return score
-
-            # If none of the logpath variants worked: try in-memory csv/stderr without json log
-            logger.info("[VMAF] Falling back to in-memory libvmaf (no log file).")
-            lavfi = f"[0:v][1:v]{filter_name}=log_fmt=csv"
+            log_path = str(temp_log)
+            lavfi = f"[0:v][1:v]libvmaf=log_fmt=json:log_path={log_path}"
             cmd = [
                 "ffmpeg",
                 "-hide_banner",
@@ -282,6 +173,7 @@ class VideoCompressionMatrix:
                 "-lavfi", lavfi,
                 "-f", "null", "-"
             ]
+            logger.info(f"[VMAF] Running: {' '.join(cmd)}")
             proc = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -292,144 +184,40 @@ class VideoCompressionMatrix:
                 timeout=600,
                 check=False
             )
-            logger.debug("[VMAF] In-memory ffmpeg stderr (first 500):\n%s", (proc.stderr or "")[:500])
-            score = self._parse_vmaf_from_csv_output(proc.stderr or "")
-            if score > 0:
-                logger.info("[VMAF] Parsed VMAF from in-memory CSV: %.3f", score)
-                return score
-            score = self._parse_vmaf_from_output(proc.stderr or "")
-            if score > 0:
-                logger.info("[VMAF] Parsed VMAF from in-memory stderr: %.3f", score)
-                return score
-
-            # Nothing worked
-            logger.error("All VMAF calculation methods failed. Last ffmpeg stderr (first 500):\n%s",
-                        (proc.stderr or "")[:500])
+            logger.debug(f"[VMAF] ffmpeg exitcode={proc.returncode}")
+            # Parse JSON log file if it exists and is non-empty
+            if temp_log.exists() and temp_log.stat().st_size > 10:
+                try:
+                    score = self._parse_vmaf_from_json(str(temp_log))
+                    if score > 0:
+                        logger.info(f"[VMAF] Parsed JSON VMAF: {score:.3f} (using {log_path})")
+                        return score
+                except Exception as e:
+                    logger.debug(f"[VMAF] JSON parse error: {e}")
+            # Fallback: parse from stderr
+            try:
+                score_csv = self._parse_vmaf_from_csv_output(proc.stderr or "")
+                if score_csv > 0:
+                    logger.info(f"[VMAF] Parsed VMAF from CSV stderr: {score_csv:.3f}")
+                    return score_csv
+            except Exception as e:
+                logger.debug(f"[VMAF] CSV parse error: {e}")
+            try:
+                score_txt = self._parse_vmaf_from_output(proc.stderr or "")
+                if score_txt > 0:
+                    logger.info(f"[VMAF] Parsed VMAF from stderr text: {score_txt:.3f}")
+                    return score_txt
+            except Exception as e:
+                logger.debug(f"[VMAF] stderr text parse error: {e}")
+            # Print the FULL ffmpeg stderr for debugging
+            logger.error(f"All VMAF calculation methods failed. Full ffmpeg stderr:\n{proc.stderr}")
             return 0.0
-
         finally:
-            # cleanup temp file
             try:
                 if temp_log.exists():
                     temp_log.unlink()
             except Exception:
                 pass
-
-    def _parse_vmaf_from_json(self, json_file: str) -> float:
-        """Parse VMAF score from JSON log file."""
-        try:
-            import json
-            with open(json_file, 'r', encoding='utf-8') as f:
-                vmaf_data = json.load(f)
-            
-            # Extract average VMAF score from frames
-            frames = vmaf_data.get('frames', [])
-            if frames:
-                vmaf_scores = []
-                for frame in frames:
-                    metrics = frame.get('metrics', {})
-                    if 'vmaf' in metrics:
-                        vmaf_scores.append(float(metrics['vmaf']))
-                
-                if vmaf_scores:
-                    avg_vmaf = sum(vmaf_scores) / len(vmaf_scores)
-                    return avg_vmaf
-            
-            # Alternative: check if there's a pooled score
-            pooled = vmaf_data.get('pooled_metrics', {})
-            if 'vmaf' in pooled:
-                return float(pooled['vmaf']['mean'])
-                
-        except Exception as e:
-            logger.debug(f"Error parsing VMAF JSON: {e}")
-        
-        return 0.0
-
-    def _parse_vmaf_from_csv_output(self, stderr_output: str) -> float:
-        """Parse VMAF score from CSV format output in stderr."""
-        try:
-            import re
-            lines = stderr_output.split('\n')
-            vmaf_scores = []
-            
-            for line in lines:
-                # Look for CSV-like VMAF data
-                if ',' in line and 'vmaf' in line.lower():
-                    # Try to extract VMAF values from CSV line
-                    parts = line.split(',')
-                    for part in parts:
-                        if 'vmaf' in part.lower():
-                            # Extract number after vmaf
-                            match = re.search(r'vmaf[:\s=]+([0-9]+\.?[0-9]*)', part.lower())
-                            if match:
-                                score = float(match.group(1))
-                                if 0 <= score <= 100:
-                                    vmaf_scores.append(score)
-                
-                # Also look for direct VMAF values in CSV format
-                if re.match(r'^[0-9]+,.*,[0-9]+\.[0-9]+', line):
-                    parts = line.split(',')
-                    for part in parts:
-                        try:
-                            val = float(part.strip())
-                            if 20 <= val <= 100:  # Reasonable VMAF range
-                                vmaf_scores.append(val)
-                        except:
-                            continue
-            
-            if vmaf_scores:
-                return sum(vmaf_scores) / len(vmaf_scores)
-                
-        except Exception as e:
-            logger.debug(f"Error parsing CSV VMAF: {e}")
-        
-        return 0.0
-
-    def _parse_vmaf_from_output(self, stderr_output: str) -> float:
-        """Parse VMAF score from general stderr text output."""
-        try:
-            import re
-            lines = stderr_output.split('\n')
-            vmaf_scores = []
-            
-            for line in lines:
-                # Look for various VMAF output patterns
-                patterns = [
-                    r'vmaf[:\s=]+([0-9]+\.?[0-9]*)',
-                    r'mean[:\s=]+([0-9]+\.?[0-9]*)',
-                    r'average[:\s=]+([0-9]+\.?[0-9]*)',
-                    r'n:[0-9]+.*vmaf:([0-9]+\.?[0-9]*)',
-                    r'VMAF score[:\s=]+([0-9]+\.?[0-9]*)'
-                ]
-                
-                for pattern in patterns:
-                    matches = re.findall(pattern, line.lower())
-                    for match in matches:
-                        try:
-                            score = float(match)
-                            if 0 <= score <= 100:
-                                vmaf_scores.append(score)
-                        except:
-                            continue
-                
-                # Look for frame-by-frame VMAF scores
-                if 'n:' in line and 'vmaf:' in line.lower():
-                    try:
-                        vmaf_part = line.lower().split('vmaf:')[1].split()[0]
-                        score = float(vmaf_part.strip(','))
-                        if 0 <= score <= 100:
-                            vmaf_scores.append(score)
-                    except:
-                        continue
-            
-            if vmaf_scores:
-                # Return average of all found scores
-                return sum(vmaf_scores) / len(vmaf_scores)
-            
-        except Exception as e:
-            logger.debug(f"Error parsing stderr VMAF: {e}")
-        
-        return 0.0
 
     def _parse_vmaf_from_json(self, json_file: str) -> float:
         """Parse VMAF score from JSON log file."""
@@ -505,36 +293,39 @@ class VideoCompressionMatrix:
             logger.error(f"Error calculating compression ratio: {e}")
             return 0.0
 
-    def generate_matrices(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Generate VMAF and compression ratio matrices for all algorithms and videos."""
+    def generate_matrices(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Generate VMAF, compression ratio, and compression time matrices for all algorithms and videos."""
         num_videos = len(self.videos)
         num_algorithms = len(self.algorithms)
 
         if num_videos == 0 or num_algorithms == 0:
             logger.error("No videos or algorithms found!")
-            return None, None
+            return None, None, None
 
         vmaf_matrix = np.zeros((num_videos, num_algorithms))
         compression_matrix = np.zeros((num_videos, num_algorithms))
+        compression_time_matrix = np.zeros((num_videos, num_algorithms))  # NEW: Time matrix
 
         output_base_path = Path(self.config.get('OUTPUT_VIDEO_PATH', './output_videos'))
 
         for i, video in enumerate(self.videos):
             video_name = Path(video).stem
+            input_ext = Path(video).suffix  # Get the input extension
             logger.info(f"Processing video {i+1}/{num_videos}: {video_name}")
 
             for j, algorithm in enumerate(self.algorithms):
                 algo_name = Path(algorithm).name
                 logger.info(f"  Running algorithm {j+1}/{num_algorithms}: {algo_name}")
 
-                    # Generate output path
+                # Generate output path
                 if 'vp9' in algo_name.lower():
                     output_video = output_base_path / algo_name / f"{video_name}_compressed.webm"
                 else:
-                    output_video = output_base_path / algo_name / f"{video_name}_compressed.mp4"
+                    output_video = output_base_path / algo_name / f"{video_name}_compressed{input_ext}"
 
                 # Run compression algorithm
-                if self.run_algorithm(algorithm, video, str(output_video)):
+                success, comp_time = self.run_algorithm(algorithm, video, str(output_video))  # NEW: Capture time
+                if success:
                     # Calculate VMAF score
                     vmaf_score = self.calculate_vmaf(video, str(output_video))
                     vmaf_matrix[i, j] = vmaf_score
@@ -543,16 +334,21 @@ class VideoCompressionMatrix:
                     comp_ratio = self.calculate_compression_ratio(video, str(output_video))
                     compression_matrix[i, j] = comp_ratio
 
-                    logger.info(f"    VMAF: {vmaf_score:.2f}, Compression: {comp_ratio:.2f}x")
+                    # Store compression time
+                    compression_time_matrix[i, j] = comp_time  # NEW: Store time
+
+                    logger.info(f"    VMAF: {vmaf_score:.2f}, Compression: {comp_ratio:.2f}x, Time: {comp_time:.2f}s")
                 else:
                     logger.warning(f"    Failed to compress with {algo_name}")
                     vmaf_matrix[i, j] = 0.0
                     compression_matrix[i, j] = 0.0
+                    compression_time_matrix[i, j] = 0.0  # NEW: Set time to 0 for failures
 
         self.vmaf_matrix = vmaf_matrix
         self.compression_matrix = compression_matrix
+        self.compression_time_matrix = compression_time_matrix  # NEW: Store time matrix
 
-        return vmaf_matrix, compression_matrix
+        return vmaf_matrix, compression_matrix, compression_time_matrix  # NEW: Return time matrix
 
     def save_results(self, output_dir: str = "./results"):
         """Save matrices and results to files."""
@@ -575,6 +371,10 @@ class VideoCompressionMatrix:
         comp_df = pd.DataFrame(self.compression_matrix, index=video_details, columns=algo_names)
         comp_df.to_csv(os.path.join(output_dir, 'compression_matrix.csv'), index_label="Video Details")
 
+        # NEW: Save compression time matrix as CSV
+        time_df = pd.DataFrame(self.compression_time_matrix, index=video_details, columns=algo_names)
+        time_df.to_csv(os.path.join(output_dir, 'compression_time_matrix.csv'), index_label="Video Details")
+
         # Save summary statistics
         summary = {
             'total_videos': len(self.videos),
@@ -586,6 +386,9 @@ class VideoCompressionMatrix:
             },
             'average_compression_per_algorithm': {
                 algo: float(ratio) for algo, ratio in zip(algo_names, self.compression_matrix.mean(axis=0))
+            },
+            'average_compression_time_per_algorithm': {
+                algo: float(comp_time) for algo, comp_time in zip(algo_names, self.compression_time_matrix.mean(axis=0))
             },
             'note': 'VMAF scores are estimated based on compression ratios - not actual VMAF calculations'
         }
@@ -669,10 +472,10 @@ class VideoCompressionMatrix:
             return
 
         # Generate matrices
-        logger.info("[PROCESSING] Generating VMAF and compression matrices...")
-        vmaf_matrix, compression_matrix = self.generate_matrices()
+        logger.info("[PROCESSING] Generating VMAF, compression, and time matrices...")
+        vmaf_matrix, compression_matrix, time_matrix = self.generate_matrices()
 
-        if vmaf_matrix is not None and compression_matrix is not None:
+        if vmaf_matrix is not None and compression_matrix is not None and time_matrix is not None:
             # Save results
             self.save_results()
 

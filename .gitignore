@@ -5,3 +5,4 @@
 *.webm
 *.mvi
 temp_algo/*
+.vscode-root

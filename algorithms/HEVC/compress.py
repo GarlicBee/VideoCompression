@@ -1,7 +1,306 @@
+# #!/usr/bin/env python3
+# """
+# H.265/HEVC Video Compression Algorithm
+# Advanced video compression using H.265 (HEVC) codec with optimized settings
+# """
+
+# import argparse
+# import json
+# import os
+# import subprocess
+# import sys
+# import time
+# from pathlib import Path
+# from typing import Dict, Any
+
+# class H265Compressor:
+#     def __init__(self, config_file: str = "config.json"):
+#         """Initialize H.265 compressor with configuration."""
+#         self.config = self._load_config(config_file)
+#         self.start_time = None
+
+#     def _load_config(self, config_file: str) -> Dict[str, Any]:
+#         """Load algorithm configuration from JSON file."""
+#         config_path = Path(__file__).parent / config_file
+
+#         # Default configuration if file doesn't exist
+#         default_config = {
+#             "algorithm_name": "H.265 High Efficiency",
+#             "parameters": {
+#                 "preset": "medium",
+#                 "crf": 28,
+#                 "profile": "main",
+#                 "level": "4.1",
+#                 "tune": "none",
+#                 "threads": 0,
+#                 "tile_columns": 2,
+#                 "tile_rows": 1
+#             },
+#             "audio": {
+#                 "codec": "aac",
+#                 "bitrate": "128k",
+#                 "sample_rate": 44100
+#             }
+#         }
+
+#         if config_path.exists():
+#             try:
+#                 with open(config_path, 'r') as f:
+#                     loaded_config = json.load(f)
+#                 # Merge with defaults
+#                 default_config.update(loaded_config)
+#                 return default_config
+#             except (json.JSONDecodeError, IOError) as e:
+#                 print(f"Warning: Error loading config file: {e}")
+#                 print("Using default configuration")
+
+#         return default_config
+
+#     def _validate_input(self, input_video: str) -> bool:
+#         """Validate input video file."""
+#         if not os.path.exists(input_video):
+#             print(f"Error: Input video file '{input_video}' does not exist!")
+#             return False
+
+#         # Check if file is readable
+#         try:
+#             with open(input_video, 'rb') as f:
+#                 f.read(1024)  # Try to read first 1KB
+#         except IOError:
+#             print(f"Error: Cannot read input video file '{input_video}'!")
+#             return False
+
+#         return True
+
+#     def _get_video_info(self, video_path: str) -> Dict[str, Any]:
+#         """Get video information using ffprobe."""
+#         try:
+#             cmd = [
+#                 'ffprobe',
+#                 '-v', 'quiet',
+#                 '-print_format', 'json',
+#                 '-show_format',
+#                 '-show_streams',
+#                 video_path
+#             ]
+
+#             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+#             if result.returncode == 0:
+#                 return json.loads(result.stdout)
+#             else:
+#                 return {}
+
+#         except Exception:
+#             return {}
+
+#     def _build_ffmpeg_command(self, input_video: str, output_video: str) -> list:
+#         """Build FFmpeg command with H.265 parameters."""
+#         params = self.config.get('parameters', {})
+#         audio_params = self.config.get('audio', {})
+
+#         cmd = [
+#             'ffmpeg',
+#             '-y',  # Overwrite output file
+#             '-i', input_video,
+
+#             # Video codec settings
+#             '-c:v', 'libx265',
+#             '-preset', str(params.get('preset', 'medium')),
+#             '-crf', str(params.get('crf', 28)),
+#             '-profile:v', params.get('profile', 'main'),
+#             '-level', params.get('level', '4.1'),
+
+#             # Threading
+#             '-threads', str(params.get('threads', 0)),
+
+#             # H.265 specific optimizations
+#             '-x265-params', self._build_x265_params(params),
+
+#             # Audio settings
+#             '-c:a', audio_params.get('codec', 'aac'),
+#             '-b:a', audio_params.get('bitrate', '128k'),
+#             '-ar', str(audio_params.get('sample_rate', 44100)),
+
+#             # Output
+#             output_video
+#         ]
+
+#         # Add tuning if specified
+#         tune = params.get('tune', 'none')
+#         if tune and tune != 'none':
+#             cmd.extend(['-tune', tune])
+
+#         return cmd
+
+#     def _build_x265_params(self, params: Dict[str, Any]) -> str:
+#         """Build x265-specific parameter string."""
+#         x265_params = []
+
+#         # Tile settings for parallel processing
+#         tile_cols = params.get('tile_columns', 2)
+#         tile_rows = params.get('tile_rows', 1)
+#         if tile_cols > 0 and tile_rows > 0:
+#             x265_params.append(f"tiles={tile_cols}x{tile_rows}")
+
+#         # Rate control optimizations
+#         x265_params.extend([
+#             "rc-lookahead=25",
+#             "bframes=4",
+#             "b-adapt=2",
+#             "ref=3"
+#         ])
+
+#         # Quality optimizations
+#         x265_params.extend([
+#             "me=hex",
+#             "subme=2",
+#             "rd=2"
+#         ])
+
+#         return ":".join(x265_params)
+
+#     def compress(self, input_video: str, output_video: str) -> bool:
+#         """
+#         Main compression function using H.265/HEVC codec.
+
+#         Args:
+#             input_video (str): Path to input video file
+#             output_video (str): Path to output compressed video file
+
+#         Returns:
+#             bool: True if compression successful, False otherwise
+#         """
+#         self.start_time = time.time()
+
+#         print(f"[VIDEO] Starting H.265 compression...")
+#         print(f"[INPUT] {input_video}")
+
+#         # Ensure output extension matches input extension
+#         input_extension = Path(input_video).suffix
+#         if not output_video.endswith(input_extension):
+#             output_video = str(Path(output_video).with_suffix(input_extension))
+
+#         print(f"[OUTPUT] {output_video}")
+
+#         # Validate input
+#         if not self._validate_input(input_video):
+#             return False
+
+#         # Create output directory
+#         try:
+#             Path(output_video).parent.mkdir(parents=True, exist_ok=True)
+#         except OSError as e:
+#             print(f"[ERROR] Cannot create output directory: {e}")
+#             return False
+
+#         # Get input video information
+#         video_info = self._get_video_info(input_video)
+#         if video_info:
+#             format_info = video_info.get('format', {})
+#             duration = float(format_info.get('duration', 0))
+#             size_mb = int(format_info.get('size', 0)) / (1024 * 1024)
+#             print(f"[INFO] Input: {size_mb:.1f} MB, {duration:.1f}s")
+
+#         # Build and execute FFmpeg command
+#         cmd = self._build_ffmpeg_command(input_video, output_video)
+
+#         preset = self.config.get('parameters', {}).get('preset', 'medium')
+#         crf = self.config.get('parameters', {}).get('crf', 28)
+#         print(f"[CONFIG] Preset: {preset}, CRF: {crf}")
+
+#         try:
+#             # Run compression
+#             result = subprocess.run(
+#                 cmd,
+#                 capture_output=True,
+#                 text=True,
+#                 timeout=600  # 10 minute timeout
+#             )
+
+#             if result.returncode == 0:
+#                 end_time = time.time()
+#                 compression_time = end_time - self.start_time
+
+#                 # Get output file info
+#                 if os.path.exists(output_video):
+#                     output_size_mb = os.path.getsize(output_video) / (1024 * 1024)
+#                     if video_info:
+#                         input_size_mb = int(video_info.get('format', {}).get('size', 0)) / (1024 * 1024)
+#                         if input_size_mb > 0:
+#                             compression_ratio = input_size_mb / output_size_mb
+#                             print(f"[SUCCESS] Compressed: {compression_ratio:.1f}x reduction")
+#                             print(f"[SIZE] {input_size_mb:.1f} MB -> {output_size_mb:.1f} MB")
+#                             print(f"[TIME] {compression_time:.1f}s")
+#                             return True
+
+#                 print(f"[SUCCESS] Compression completed in {compression_time:.1f}s")
+#                 return True
+#             else:
+#                 print(f"[ERROR] FFmpeg failed with return code: {result.returncode}")
+#                 # Show only essential error info
+#                 if result.stderr:
+#                     error_lines = result.stderr.split('\n')
+#                     for line in error_lines[-3:]:  # Last 3 lines
+#                         if line.strip() and 'error' in line.lower():
+#                             print(f"[ERROR] {line.strip()}")
+#                 return False
+
+#         except subprocess.TimeoutExpired:
+#             print(f"[ERROR] Compression timed out")
+#             return False
+#         except Exception as e:
+#             print(f"[ERROR] Compression failed: {e}")
+#             return False
+
+# def main():
+#     """Main entry point for H.265 compression algorithm."""
+#     # CORRECT argument parsing for compress.py
+#     parser = argparse.ArgumentParser(
+#         description='H.265/HEVC Video Compression Algorithm'
+#     )
+
+#     parser.add_argument(
+#         '--input', 
+#         required=True, 
+#         help='Input video file path'
+#     )
+#     parser.add_argument(
+#         '--output', 
+#         required=True, 
+#         help='Output compressed video file path'
+#     )
+#     parser.add_argument(
+#         '--config', 
+#         default='config.json', 
+#         help='Configuration file path (default: config.json)'
+#     )
+
+#     args = parser.parse_args()
+
+#     # Validate input file exists
+#     if not os.path.exists(args.input):
+#         print(f"[ERROR] Input file '{args.input}' does not exist!")
+#         sys.exit(1)
+
+#     # Initialize compressor and run compression
+#     try:
+#         compressor = H265Compressor(args.config)
+#         success = compressor.compress(args.input, args.output)
+#         sys.exit(0 if success else 1)
+
+#     except Exception as e:
+#         print(f"[ERROR] Failed to initialize compressor: {e}")
+#         sys.exit(1)
+
+# if __name__ == "__main__":
+#     main()
+
 #!/usr/bin/env python3
 """
-H.265/HEVC Video Compression Algorithm
-Advanced video compression using H.265 (HEVC) codec with optimized settings
+H.265/HEVC Video Compression Algorithm with Automatic CRF Optimization
+Automatically optimizes CRF to maximize SF score when called
+SF = w_c*(1-c^1.5) + w_vmaf*(VMAF-VMAF_threshold)/(100-VMAF_threshold)
 """
 
 import argparse
@@ -10,8 +309,19 @@ import os
 import subprocess
 import sys
 import time
+import shutil
+import tempfile
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# SF Optimization Constants
+VMAF_THRESHOLD = 85
+W_C = 0.8
+W_VMAF = 0.2
+CRF_MIN = 28
+CRF_MAX = 34
+CRF_STEP = 2  # Step size for CRF values (28, 30, 32, 34)
 
 class H265Compressor:
     def __init__(self, config_file: str = "config.json"):
@@ -160,114 +470,347 @@ class H265Compressor:
 
         return ":".join(x265_params)
 
-    def compress(self, input_video: str, output_video: str) -> bool:
-        """
-        Main compression function using H.265/HEVC codec.
 
-        Args:
-            input_video (str): Path to input video file
-            output_video (str): Path to output compressed video file
+# ============================================================================
+# CRF OPTIMIZATION FUNCTIONS
+# ============================================================================
 
-        Returns:
-            bool: True if compression successful, False otherwise
-        """
-        self.start_time = time.time()
+def compute_vmaf(original: str, compressed: str) -> float:
+    """
+    Compute VMAF score between original and compressed video using ffmpeg.
 
-        print(f"[VIDEO] Starting H.265 compression...")
-        print(f"[INPUT] {input_video}")
-        print(f"[OUTPUT] {output_video}")
+    Args:
+        original: Path to original video
+        compressed: Path to compressed video
 
-        # Validate input
-        if not self._validate_input(input_video):
-            return False
+    Returns:
+        VMAF score (0-100), or None if computation fails
+    """
+    try:
+        # Create temporary file for VMAF log
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+            vmaf_log_path = tmp.name
 
-        # Create output directory
-        try:
-            Path(output_video).parent.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            print(f"[ERROR] Cannot create output directory: {e}")
-            return False
+        # Use absolute paths
+        original = os.path.abspath(original)
+        compressed = os.path.abspath(compressed)
 
-        # Get input video information
-        video_info = self._get_video_info(input_video)
-        if video_info:
-            format_info = video_info.get('format', {})
-            duration = float(format_info.get('duration', 0))
-            size_mb = int(format_info.get('size', 0)) / (1024 * 1024)
-            print(f"[INFO] Input: {size_mb:.1f} MB, {duration:.1f}s")
+        # Build VMAF command
+        vmaf_cmd = [
+            'ffmpeg',
+            '-i', original,
+            '-i', compressed,
+            '-lavfi',
+            f'[0:v]scale=1920:1080:force_original_aspect_ratio=decrease[ref];'
+            f'[1:v]scale=1920:1080:force_original_aspect_ratio=decrease[dist];'
+            f'[ref][dist]libvmaf=log_path={vmaf_log_path}:log_fmt=json',
+            '-f', 'null',
+            '-'
+        ]
 
-        # Build and execute FFmpeg command
-        cmd = self._build_ffmpeg_command(input_video, output_video)
+        # Run VMAF calculation
+        result = subprocess.run(
+            vmaf_cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
 
-        preset = self.config.get('parameters', {}).get('preset', 'medium')
-        crf = self.config.get('parameters', {}).get('crf', 28)
-        print(f"[CONFIG] Preset: {preset}, CRF: {crf}")
+        # Parse VMAF score from log file
+        if os.path.exists(vmaf_log_path):
+            try:
+                with open(vmaf_log_path, 'r') as f:
+                    vmaf_data = json.load(f)
+                    # Extract pooled VMAF score
+                    vmaf_score = vmaf_data.get('pooled_metrics', {}).get('vmaf', {}).get('mean')
+                    if vmaf_score is not None:
+                        return float(vmaf_score)
+            finally:
+                # Clean up temp file
+                try:
+                    os.unlink(vmaf_log_path)
+                except:
+                    pass
 
-        try:
-            # Run compression
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=600  # 10 minute timeout
+        # Fallback: try parsing from stderr
+        for line in result.stderr.split('\n'):
+            if 'VMAF score' in line:
+                try:
+                    vmaf_score = float(line.split(':')[-1].strip())
+                    return vmaf_score
+                except (ValueError, IndexError):
+                    continue
+
+        print(f"[WARNING] Could not extract VMAF score")
+        return None
+
+    except subprocess.TimeoutExpired:
+        print(f"[ERROR] VMAF computation timed out")
+        return None
+    except Exception as e:
+        print(f"[ERROR] VMAF computation failed: {e}")
+        return None
+
+
+def calculate_sf(c: float, vmaf: float) -> float:
+    """
+    Calculate SF (Score Function) for optimization.
+
+    SF = w_c*(1-c^1.5) + w_vmaf*(VMAF-VMAF_threshold)/(100-VMAF_threshold)
+
+    Args:
+        c: Compression ratio (compressed_size / original_size)
+        vmaf: VMAF score (0-100)
+
+    Returns:
+        SF score
+    """
+    if vmaf is None:
+        return -float('inf')  # Invalid score for failed VMAF
+
+    sf = W_C * (1 - c**1.5) + W_VMAF * ((vmaf - VMAF_THRESHOLD) / (100 - VMAF_THRESHOLD))
+    return sf
+
+
+def evaluate_quality(input_video: str, compressed_video: str, orig_size: int) -> Dict[str, Any]:
+    """
+    Evaluate quality metrics for a compressed video.
+
+    Args:
+        input_video: Path to original video
+        compressed_video: Path to compressed video
+        orig_size: Original video size in bytes
+
+    Returns:
+        Dictionary with c, vmaf, and sf values
+    """
+    try:
+        output_size = os.path.getsize(compressed_video)
+        c = output_size / orig_size
+
+        print(f"[EVAL] Computing VMAF for CRF candidate...")
+        vmaf = compute_vmaf(input_video, compressed_video)
+
+        if vmaf is None:
+            print(f"[EVAL] VMAF computation failed, using fallback")
+            sf = -float('inf')
+        else:
+            sf = calculate_sf(c, vmaf)
+            print(f"[EVAL] c={c:.4f}, VMAF={vmaf:.2f}, SF={sf:.4f}")
+
+        return {
+            'c': c,
+            'vmaf': vmaf,
+            'sf': sf,
+            'size': output_size
+        }
+    except Exception as e:
+        print(f"[ERROR] Quality evaluation failed: {e}")
+        return {
+            'c': 1.0,
+            'vmaf': None,
+            'sf': -float('inf'),
+            'size': 0
+        }
+
+
+def compress_with_crf(input_video: str, crf: int, compressor: H265Compressor, 
+                      output_base: str, orig_size: int) -> Dict[str, Any]:
+    """
+    Compress video with a specific CRF value and evaluate quality.
+
+    Args:
+        input_video: Path to input video
+        crf: CRF value to use
+        compressor: H265Compressor instance
+        output_base: Base path for output (will append _crfXX)
+        orig_size: Original video size in bytes
+
+    Returns:
+        Dictionary with crf, output path, and quality metrics
+    """
+    print(f"\n[CRF {crf}] Starting compression...")
+
+    # Create unique output path for this CRF
+    output_path = Path(output_base)
+    temp_output = str(output_path.parent / f"{output_path.stem}_crf{crf}{output_path.suffix}")
+
+    try:
+        # Set CRF in config
+        compressor.config['parameters']['crf'] = crf
+
+        # Build and run compression
+        cmd = compressor._build_ffmpeg_command(input_video, temp_output)
+
+        start_time = time.time()
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600  # 10 minute timeout
+        )
+        compression_time = time.time() - start_time
+
+        if result.returncode != 0:
+            print(f"[CRF {crf}] Compression failed")
+            return {
+                'crf': crf,
+                'output': temp_output,
+                'success': False,
+                'sf': -float('inf'),
+                'compression_time': compression_time
+            }
+
+        print(f"[CRF {crf}] Compression completed in {compression_time:.1f}s")
+
+        # Evaluate quality
+        metrics = evaluate_quality(input_video, temp_output, orig_size)
+        metrics['crf'] = crf
+        metrics['output'] = temp_output
+        metrics['success'] = True
+        metrics['compression_time'] = compression_time
+
+        return metrics
+
+    except subprocess.TimeoutExpired:
+        print(f"[CRF {crf}] Compression timed out")
+        return {
+            'crf': crf,
+            'output': temp_output,
+            'success': False,
+            'sf': -float('inf'),
+            'compression_time': 0
+        }
+    except Exception as e:
+        print(f"[CRF {crf}] Error: {e}")
+        return {
+            'crf': crf,
+            'output': temp_output,
+            'success': False,
+            'sf': -float('inf'),
+            'compression_time': 0
+        }
+
+
+def optimize_crf_parallel(input_video: str, output_video: str, 
+                          compressor: H265Compressor) -> Dict[str, Any]:
+    """
+    Optimize CRF value using parallel evaluation to maximize SF.
+    Uses step size of 2 (28, 30, 32, 34).
+
+    Args:
+        input_video: Path to input video
+        output_video: Path for final output video
+        compressor: H265Compressor instance
+
+    Returns:
+        Dictionary with best CRF and quality metrics
+    """
+    print(f"\n{'='*70}")
+    print(f"[OPTIMIZE] Starting CRF optimization (CRF {CRF_MIN}-{CRF_MAX}, step={CRF_STEP})")
+    print(f"{'='*70}")
+
+    # Get original size
+    orig_size = os.path.getsize(input_video)
+    print(f"[OPTIMIZE] Original size: {orig_size / (1024*1024):.2f} MB")
+
+    # CRF range to evaluate (28, 30, 32, 34)
+    crf_range = range(CRF_MIN, CRF_MAX + 1, CRF_STEP)
+    print(f"[OPTIMIZE] Testing CRF values: {list(crf_range)}")
+
+    # Run compressions in parallel
+    results = []
+    with ThreadPoolExecutor(max_workers=len(crf_range)) as executor:
+        futures = []
+        for crf in crf_range:
+            future = executor.submit(
+                compress_with_crf,
+                input_video,
+                crf,
+                compressor,
+                output_video,
+                orig_size
             )
+            futures.append(future)
 
-            if result.returncode == 0:
-                # Compression successful
-                end_time = time.time()
-                compression_time = end_time - self.start_time
+        # Collect results as they complete
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                print(f"[ERROR] Future failed: {e}")
 
-                # Get output file info
-                if os.path.exists(output_video):
-                    output_size_mb = os.path.getsize(output_video) / (1024 * 1024)
-                    if video_info:
-                        input_size_mb = int(video_info.get('format', {}).get('size', 0)) / (1024 * 1024)
-                        if input_size_mb > 0:
-                            compression_ratio = input_size_mb / output_size_mb
-                            print(f"[SUCCESS] Compressed: {compression_ratio:.1f}x reduction")
-                            print(f"[SIZE] {input_size_mb:.1f} MB -> {output_size_mb:.1f} MB")
-                            print(f"[TIME] {compression_time:.1f}s")
-                            return True
+    # Filter successful results
+    valid_results = [r for r in results if r.get('success', False)]
 
-                print(f"[SUCCESS] Compression completed in {compression_time:.1f}s")
-                return True
-            else:
-                print(f"[ERROR] FFmpeg failed with return code: {result.returncode}")
-                # Show only essential error info
-                if result.stderr:
-                    error_lines = result.stderr.split('\n')
-                    for line in error_lines[-3:]:  # Last 3 lines
-                        if line.strip() and 'error' in line.lower():
-                            print(f"[ERROR] {line.strip()}")
-                return False
+    if not valid_results:
+        print(f"[ERROR] No successful compressions!")
+        return None
 
-        except subprocess.TimeoutExpired:
-            print("[ERROR] Compression timed out!")
-            return False
-        except Exception as e:
-            print(f"[ERROR] Compression failed: {e}")
-            return False
+    # Find best SF
+    best = max(valid_results, key=lambda r: r.get('sf', -float('inf')))
+
+    print(f"\n{'='*70}")
+    print(f"[OPTIMIZE] Results Summary:")
+    print(f"{'='*70}")
+
+    # Sort results by CRF for display
+    for result in sorted(valid_results, key=lambda r: r['crf']):
+        crf = result['crf']
+        sf = result.get('sf', -float('inf'))
+        vmaf = result.get('vmaf', 0)
+        c = result.get('c', 1)
+        marker = " <- BEST" if result == best else ""
+        print(f"  CRF {crf}: SF={sf:.4f}, VMAF={vmaf:.2f}, c={c:.4f}{marker}")
+
+    print(f"\n[OPTIMIZE] Best CRF: {best['crf']}")
+    print(f"[OPTIMIZE] Best SF: {best['sf']:.4f}")
+    print(f"[OPTIMIZE] VMAF: {best.get('vmaf', 0):.2f}")
+    print(f"[OPTIMIZE] Compression ratio: {best.get('c', 1):.4f}")
+
+    # Move best result to final output
+    try:
+        if os.path.exists(output_video):
+            os.remove(output_video)
+        shutil.move(best['output'], output_video)
+        print(f"[OPTIMIZE] Saved best result to: {output_video}")
+    except Exception as e:
+        print(f"[ERROR] Failed to move best result: {e}")
+
+    # Clean up other temporary files
+    for result in valid_results:
+        if result != best and os.path.exists(result.get('output', '')):
+            try:
+                os.remove(result['output'])
+            except:
+                pass
+
+    return best
+
 
 def main():
-    """Main entry point for H.265 compression algorithm."""
-    # CORRECT argument parsing for compress.py
+    """
+    Main entry point for H.265 compression with automatic CRF optimization.
+    Always runs optimization when called from matrix.py.
+    """
     parser = argparse.ArgumentParser(
-        description='H.265/HEVC Video Compression Algorithm'
+        description='H.265/HEVC Video Compression with Automatic CRF Optimization'
     )
 
     parser.add_argument(
-        '--input', 
-        required=True, 
+        '--input',
+        required=True,
         help='Input video file path'
     )
     parser.add_argument(
-        '--output', 
-        required=True, 
+        '--output',
+        required=True,
         help='Output compressed video file path'
     )
     parser.add_argument(
-        '--config', 
-        default='config.json', 
+        '--config',
+        default='config.json',
         help='Configuration file path (default: config.json)'
     )
 
@@ -278,15 +821,20 @@ def main():
         print(f"[ERROR] Input file '{args.input}' does not exist!")
         sys.exit(1)
 
-    # Initialize compressor and run compression
+    # Initialize compressor
     try:
         compressor = H265Compressor(args.config)
-        success = compressor.compress(args.input, args.output)
+
+        # Always run CRF optimization
+        result = optimize_crf_parallel(args.input, args.output, compressor)
+        success = result is not None
+
         sys.exit(0 if success else 1)
 
     except Exception as e:
         print(f"[ERROR] Failed to initialize compressor: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
