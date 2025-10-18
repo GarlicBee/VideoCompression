@@ -13,11 +13,11 @@
   },
   "parameters": {
     "preset": "medium",
-    "crf": 28,
+    "crf": 34,
     "profile": "main",
     "level": "4.1",
     "tune": "none",
-    "threads": 0,
+    "threads": 2,
     "tile_columns": 2,
     "tile_rows": 1
   },

@@ -1,29 +1,40 @@
 {
-  "total_videos": 10,
-  "total_algorithms": 2,
-  "video_names": [
-    "videoS1",
-    "VideoS16",
-    "VideoS17",
-    "videoS2",
-    "videoS3",
-    "VideoS7",
-    "VideoS8",
-    "VideoS9",
-    "videoS6",
-    "VideoS10"
+  "total_videos": 24,
+  "total_algorithms": 1,
+  "video_details": [
+    "VideoS13 (.mov, 16.58 s, 10.91 MB)",
+    "VideoS14 (.mov, 258.69 s, 54.36 MB)",
+    "VideoS15 (.mov, 100.12 s, 30.91 MB)",
+    "videoS25 (.mov, 46.61 s, 16.71 MB)",
+    "videoS1 (.mp4, 139.27 s, 53.09 MB)",
+    "VideoS16 (.mp4, 59.99 s, 4.31 MB)",
+    "VideoS17 (.mp4, 46.78 s, 3.31 MB)",
+    "VideoS18 (.mp4, 8.50 s, 1.72 MB)",
+    "videoS2 (.mp4, 14.84 s, 7.60 MB)",
+    "videoS3 (.mp4, 111.18 s, 25.25 MB)",
+    "videoS22 (.webm, 21.95 s, 22.40 MB)",
+    "videoS23 (.webm, 30.08 s, 18.05 MB)",
+    "videoS24 (.webm, 30.08 s, 17.94 MB)",
+    "VideoS7 (.webm, 299.27 s, 30.20 MB)",
+    "VideoS8 (.webm, 181.33 s, 20.24 MB)",
+    "VideoS9 (.webm, 186.56 s, 23.40 MB)",
+    "videoS19 (.mkv, 21.95 s, 81.65 MB)",
+    "videoS20 (.mkv, 30.08 s, 28.28 MB)",
+    "videoS21 (.mkv, 30.08 s, 28.09 MB)",
+    "videoS4 (.mkv, 130.52 s, 40.62 MB)",
+    "videoS6 (.mkv, 270.79 s, 38.80 MB)",
+    "VideoS10 (.avi, 202.66 s, 10.49 MB)",
+    "VideoS11 (.avi, 264.91 s, 35.72 MB)",
+    "VideoS12 (.avi, 10.76 s, 3.05 MB)"
   ],
   "algorithm_names": [
-    "HEVC",
-    "VP9"
+    "HEVC"
   ],
   "average_vmaf_per_algorithm": {
-    "HEVC": 94.03112718286921,
-    "VP9": 70.73167926324166
+    "HEVC": 84.67451932617267
   },
   "average_compression_per_algorithm": {
-    "HEVC": 1.3509505871923733,
-    "VP9": 0.8127689765419502
+    "HEVC": 6.654460627946542
   },
   "note": "VMAF scores are estimated based on compression ratios - not actual VMAF calculations"
 }

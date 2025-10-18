@@ -558,22 +558,28 @@ class VideoCompressionMatrix:
         """Save matrices and results to files."""
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-        video_names = [Path(v).stem for v in self.videos]
+        video_details = []
+        for video in self.videos:
+            video_path = Path(video)
+            size_mb = os.path.getsize(video) / (1024 * 1024)
+            duration = self._get_video_duration(video)
+            video_details.append(f"{video_path.stem} ({video_path.suffix}, {duration:.2f} s, {size_mb:.2f} MB)")
+
         algo_names = [Path(a).name for a in self.algorithms]
 
         # Save VMAF matrix as CSV
-        vmaf_df = pd.DataFrame(self.vmaf_matrix, index=video_names, columns=algo_names)
-        vmaf_df.to_csv(os.path.join(output_dir, 'vmaf_matrix.csv'))
+        vmaf_df = pd.DataFrame(self.vmaf_matrix, index=video_details, columns=algo_names)
+        vmaf_df.to_csv(os.path.join(output_dir, 'vmaf_matrix.csv'), index_label="Video Details")
 
         # Save compression matrix as CSV
-        comp_df = pd.DataFrame(self.compression_matrix, index=video_names, columns=algo_names)
-        comp_df.to_csv(os.path.join(output_dir, 'compression_matrix.csv'))
+        comp_df = pd.DataFrame(self.compression_matrix, index=video_details, columns=algo_names)
+        comp_df.to_csv(os.path.join(output_dir, 'compression_matrix.csv'), index_label="Video Details")
 
         # Save summary statistics
         summary = {
             'total_videos': len(self.videos),
             'total_algorithms': len(self.algorithms),
-            'video_names': video_names,
+            'video_details': video_details,
             'algorithm_names': algo_names,
             'average_vmaf_per_algorithm': {
                 algo: float(score) for algo, score in zip(algo_names, self.vmaf_matrix.mean(axis=0))
@@ -588,6 +594,22 @@ class VideoCompressionMatrix:
             json.dump(summary, f, indent=2)
 
         logger.info(f"Results saved to {output_dir}")
+
+    def _get_video_duration(self, video_path: str) -> float:
+        """Get the duration of a video in seconds."""
+        try:
+            cmd = [
+                "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return float(result.stdout.strip())
+        except subprocess.CalledProcessError as e:
+            logger.error(f"ffprobe error for {video_path}: {e.stderr}")
+            return 0.0
+        except Exception as e:
+            logger.error(f"Error getting duration for {video_path}: {e}")
+            return 0.0
 
     def print_stats(self):
         """Print discovery and processing statistics."""
@@ -625,7 +647,6 @@ class VideoCompressionMatrix:
 
         print(f"\n[FORMAT] Supported formats: {', '.join(self.supported_formats)}")
         print(f"[OUTPUT] Output directory: {self.config.get('OUTPUT_VIDEO_PATH', './output_videos')}")
-        print(f"[NOTE] VMAF scores will be estimated based on compression ratios")
         print("="*70)
 
     def run(self):
