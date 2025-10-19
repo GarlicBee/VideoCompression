@@ -1,21 +1,20 @@
 {
-  "total_videos": 2,
+  "total_videos": 1,
   "total_algorithms": 1,
   "video_details": [
-    "VideoS15 (.mov, 100.12 s, 30.91 MB)",
-    "videoS2 (.mp4, 14.84 s, 7.60 MB)"
+    "2 (.mp4, 112.27 s, 12.09 MB)"
   ],
   "algorithm_names": [
     "HEVC"
   ],
   "average_vmaf_per_algorithm": {
-    "HEVC": 88.92631661828551
+    "HEVC": 86.6955709083779
   },
   "average_compression_per_algorithm": {
-    "HEVC": 2.852828907870194
+    "HEVC": 1.6277423553577859
   },
   "average_compression_time_per_algorithm": {
-    "HEVC": 259.9899946451187
+    "HEVC": 318.98346400260925
   },
   "note": "VMAF scores are estimated based on compression ratios - not actual VMAF calculations"
 }

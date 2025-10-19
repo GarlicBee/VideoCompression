@@ -1,4 +1,3 @@
-# #!/usr/bin/env python3
 # """
 # H.265/HEVC Video Compression Algorithm
 # Advanced video compression using H.265 (HEVC) codec with optimized settings
@@ -298,10 +297,10 @@
 
 #!/usr/bin/env python3
 """
-H.265/HEVC Video Compression Algorithm with Automatic CRF Optimization
-Automatically optimizes CRF to maximize SF score when called
-SF = w_c*(1-c^1.5) + w_vmaf*(VMAF-VMAF_threshold)/(100-VMAF_threshold)
-"""
+# H.265/HEVC Video Compression Algorithm with Automatic CRF Optimization
+# Automatically optimizes CRF to maximize SF score when called
+# SF = w_c*(1-c^1.5) + w_vmaf*(VMAF-VMAF_threshold)/(100-VMAF_threshold)
+# """
 
 import argparse
 import json
@@ -514,8 +513,8 @@ def compute_vmaf(original: str, compressed: str) -> float:
             '-i', original,
             '-i', compressed,
             '-lavfi',
-            f'[0:v]scale=1920:1080:force_original_aspect_ratio=decrease[ref];'
-            f'[1:v]scale=1920:1080:force_original_aspect_ratio=decrease[dist];'
+            f'[0:v]scale=960:540:force_original_aspect_ratio=decrease[ref];'
+            f'[1:v]scale=960:540:force_original_aspect_ratio=decrease[dist];'
             f'[ref][dist]libvmaf=log_path={vmaf_log_path}:log_fmt=json',
             '-f', 'null',
             '-'
@@ -585,6 +584,7 @@ def calculate_sf(c: float, vmaf: float, w_c: float, w_vmaf: float, vmaf_threshol
         return -float('inf')  # Invalid score for failed VMAF
 
     sf = w_c * (1 - c**1.5) + w_vmaf * ((vmaf - vmaf_threshold) / (100 - vmaf_threshold))
+    #print(f"[CRF {crf}] -> VMAF={vmaf:.2f}, c={c:.4f}, SF={sf:.4f}")
     return sf
 
 
@@ -892,3 +892,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

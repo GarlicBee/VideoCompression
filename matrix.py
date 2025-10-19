@@ -125,7 +125,8 @@ class VideoCompressionMatrix:
             ]
 
             start_time = time.time()
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # 10 minute timeout
+            #result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # 10 minute timeout
+            result = subprocess.run(cmd, text=True, timeout=600)
             end_time = time.time()
             compression_time = end_time - start_time  # NEW: Calculate compression time
 
@@ -489,7 +490,7 @@ class VideoCompressionMatrix:
             avg_compression = np.mean(compression_matrix, axis=0)
 
             for i, algo in enumerate(algo_names):
-                print(f"  {algo}: Estimated VMAF={avg_vmaf[i]:.2f}, Compression={avg_compression[i]:.2f}x")
+                print(f"  {algo}: VMAF={avg_vmaf[i]:.2f}, Compression={avg_compression[i]:.2f}x")
 
         else:
             logger.error("[ERROR] Failed to generate matrices!")
