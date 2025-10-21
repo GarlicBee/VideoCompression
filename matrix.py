@@ -125,8 +125,7 @@ class VideoCompressionMatrix:
             ]
 
             start_time = time.time()
-            #result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # 10 minute timeout
-            result = subprocess.run(cmd, text=True, timeout=600)
+            result = subprocess.run(cmd, text=True, timeout=1600)  # 26 minute timeout
             end_time = time.time()
             compression_time = end_time - start_time  # NEW: Calculate compression time
 
@@ -182,7 +181,7 @@ class VideoCompressionMatrix:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=600,
+                timeout=1600,
                 check=False
             )
             logger.debug(f"[VMAF] ffmpeg exitcode={proc.returncode}")
@@ -403,17 +402,33 @@ class VideoCompressionMatrix:
         """Get the duration of a video in seconds."""
         try:
             cmd = [
-                "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            return float(result.stdout.strip())
-        except subprocess.CalledProcessError as e:
-            logger.error(f"ffprobe error for {video_path}: {e.stderr}")
+            result = subprocess.run(cmd, text=True, check=False)
+            if result.returncode == 0 and result.stdout:
+                return float(result.stdout.strip())
+            else:
+                # fallback: parse JSON
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                    "-show_format", "-show_streams", video_path],
+                    capture_output=True, text=True
+                )
+                import json
+                if probe.stdout:
+                    data = json.loads(probe.stdout)
+                    dur = data.get("format", {}).get("duration")
+                    if dur:
+                        return float(dur)
             return 0.0
         except Exception as e:
-            logger.error(f"Error getting duration for {video_path}: {e}")
+            logger.error(f"ffprobe error for {video_path}: {e}")
             return 0.0
+
 
     def print_stats(self):
         """Print discovery and processing statistics."""

@@ -13,7 +13,7 @@
   },
   "parameters": {
     "preset": "medium",
-    "crf": 34,
+    "crf": 40,
     "profile": "main",
     "level": "4.1",
     "tune": "none",
@@ -31,8 +31,8 @@
   "vmaf_threshold": 85,
   "w_c": 0.8,
   "w_vmaf": 0.2,
-  "crf_min": 28,
-  "crf_max": 34,
+  "crf_min": 24,
+  "crf_max": 44,
   "crf_step": 2
   },
   "quality_settings": {
