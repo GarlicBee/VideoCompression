@@ -582,7 +582,7 @@ def main():
 
         # Always run CRF optimization
         result = optimize_crf_parallel(args.input, args.output, compressor)
-        success = result is not None
+        success = result is not Nonegit
 
         sys.exit(0 if success else 1)
 
