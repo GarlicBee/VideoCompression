@@ -6,3 +6,4 @@
 *.mvi
 temp_algo/*
 .vscode-root
+__pycache__

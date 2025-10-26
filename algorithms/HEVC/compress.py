@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-H.265/HEVC Video Compression Algorithm — Linux-ready, high-quality, container-safe
-Converted from Windows version and hardened for Linux ffmpeg builds.
-
-Behavior:
-- Preserves the input file extension for the output filename (as requested).
-- Chooses a container-compatible encoder automatically (e.g. VP9 for .webm, x265 for .mp4/.mkv).
-- Smart decoder probing for VP8/VP9/AV1 inputs.
-- Smart audio handling (Opus in .webm -> keep as libopus; if output codec needs AAC, resample to 48k stereo).
-- High-quality defaults (CRF default lowered to 22) while remaining configurable via config.json.
-
-Notes:
-- Encoding HEVC into .webm is nonstandard; to ensure "works" we will select a compatible encoder for the container (webm -> VP9/AV1).
-- This keeps your "output extension same as input" requirement and guarantees successful muxing on Linux.
+Fixed H.265/HEVC compression script — Linux-ready, high-quality, container-safe
+Modifications:
+  - Assume all input videos are 8-bit, yuv420p.
+  - Use libx264 (H.264) when input extension is .avi.
+  - Golden search scoring changed to:
+       compression = initial_size / final_size
+       score = 0.7 * compression + 0.3 * vmaf
+    and the golden search maximizes that score.
+Usage: same as before (see main()).
 """
 
 import argparse
@@ -22,10 +18,154 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 import math
 import tempfile
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from fractions import Fraction
+
+sys.path.append(str(Path(__file__).parent))
+try:
+    from score import calculate_compression_score
+except Exception:
+    # keep a harmless fallback (not used by golden_search scoring anymore)
+    def calculate_compression_score(**kwargs):
+        vmaf_score = kwargs.get('vmaf_score', 0)
+        compression_rate = kwargs.get('compression_rate', 1.0)
+        return vmaf_score - compression_rate * 10, compression_rate, vmaf_score, 'fallback'
+
+
+# ---- Defaults for the fast VMAF function ----
+SAMPLING_VMAF_SUBSAMPLE = 8            # number of samples used by libvmaf (n_subsample)
+SAMPLING_VMAF_DOWNSCALE_HALF = False   # whether to half-res during libvmaf preproc
+VMAF_THREADS = 0                       # libvmaf n_threads (0 -> autodetect)
+
+
+# ---- Helper: run a command via subprocess and return (code, stdout, stderr) ----
+def run_cmd(args: List[str], timeout: int = 1200) -> Tuple[int, str, str]:
+    """
+    Runs ffmpeg (or any command if full path supplied in args[0]) with provided args.
+    Prepends 'ffmpeg' if the first element doesn't look like an executable path.
+    Returns (returncode, stdout, stderr).
+    """
+    if not args:
+        raise ValueError("run_cmd requires a non-empty args list")
+    cmd = args[:] if args[0].lower().endswith("ffmpeg") or os.path.basename(args[0]).lower() == "ffmpeg" else ["ffmpeg"] + args
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False
+        )
+        return proc.returncode, (proc.stdout or ""), (proc.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        return -1, "", f"TimeoutExpired: {e}"
+
+
+# ---- Helper: probe basic video properties (width, height, fps) ----
+def _probe_video_props(path: str) -> Tuple[int, int, float]:
+    """
+    Returns (width, height, fps) for the first video stream in the file.
+    On failure returns (0,0,0.0).
+    """
+    try:
+        res = subprocess.run([
+            'ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', path
+        ], capture_output=True, text=True, timeout=30)
+        if res.returncode != 0 or not res.stdout:
+            return 0, 0, 0.0
+        info = json.loads(res.stdout)
+        for s in info.get('streams', []):
+            if s.get('codec_type') == 'video':
+                w = int(s.get('width') or 0)
+                h = int(s.get('height') or 0)
+                rfr = s.get('r_frame_rate') or s.get('avg_frame_rate') or '0/1'
+                try:
+                    fps = float(Fraction(rfr))
+                except Exception:
+                    fps = 0.0
+                return w, h, fps
+    except Exception:
+        pass
+    return 0, 0, 0.0
+
+
+# ---- The fast VMAF function (self-contained) ----
+def vmaf_mean_aligned_fast(ref: str,
+                           dist: str,
+                           src_for_norm: Optional[str] = None,
+                           n_subsample: int = SAMPLING_VMAF_SUBSAMPLE,
+                           half_res: bool = SAMPLING_VMAF_DOWNSCALE_HALF,
+                           vmaf_threads: int = VMAF_THREADS) -> float:
+    """
+    Fast sampling VMAF:
+      - Probe reference (or src_for_norm) to learn width/height/fps
+      - Align PTS + normalize CFR (fps), optionally half-res
+      - Force format to yuv420p for libvmaf (inputs are 8-bit yuv420p per assumption)
+      - Run libvmaf with n_subsample and parse JSON log result
+    Returns float VMAF mean (0-100). Raises on unrecoverable errors.
+    """
+    srcn = src_for_norm or ref
+
+    w, h, fps = _probe_video_props(srcn)
+    scale_filter = ""
+    fps_filter = ""
+    if w > 0 and h > 0:
+        if half_res:
+            w = max(1, w // 2)
+            h = max(1, h // 2)
+        scale_filter = f"scale={w}:{h}:flags=bicubic,"
+    if fps > 0:
+        fps_filter = f"fps=fps={fps},"
+
+    with tempfile.TemporaryDirectory() as td:
+        logp = os.path.join(td, "vmaf.json")
+        opts = [f"n_threads={vmaf_threads}", "log_fmt=json", f"log_path={logp}"]
+        if n_subsample and n_subsample > 1:
+            opts.append(f"n_subsample={n_subsample}")
+
+        lavfi = (
+            f"[0:v]setpts=PTS-STARTPTS,{scale_filter}{fps_filter}format=yuv420p[ref];"
+            f"[1:v]setpts=PTS-STARTPTS,{scale_filter}{fps_filter}format=yuv420p[dist];"
+            f"[ref][dist]libvmaf=" + ":".join(opts)
+        )
+
+        args = [
+            "-hide_banner",
+            "-y",
+            "-i", str(Path(ref).resolve()),
+            "-i", str(Path(dist).resolve()),
+            "-lavfi", lavfi,
+            "-f", "null", "-"
+        ]
+        code, out, err = run_cmd(args, timeout=1200)
+        if code != 0:
+            raise RuntimeError(f"VMAF (fast) ffmpeg failed (code={code}): {err[-2000:]}")
+
+        if not os.path.exists(logp):
+            raise RuntimeError("VMAF JSON log not found after libvmaf run")
+        try:
+            with open(logp, "r") as f:
+                data = json.load(f)
+        except Exception as e:
+            raise RuntimeError(f"Failed to read/parse vmaf JSON log: {e}")
+
+        try:
+            return float(data["pooled_metrics"]["vmaf"]["mean"])
+        except Exception:
+            frames = data.get("frames", [])
+            vals = [fr.get("metrics", {}).get("vmaf") for fr in frames if "metrics" in fr and "vmaf" in fr.get("metrics", {})]
+            vals = [float(v) for v in vals if v is not None]
+            if not vals:
+                raise RuntimeError("VMAF JSON missing values")
+            return sum(vals) / len(vals)
+
 
 class H265Compressor:
     def __init__(self, config_file: str = "config.json"):
@@ -34,7 +174,6 @@ class H265Compressor:
 
     def _load_config(self, config_file: str) -> Dict[str, Any]:
         config_path = Path(__file__).parent / config_file
-        # Higher-quality default CRF (22) for better visual quality on Linux
         default_config = {
             "algorithm_name": "H.265 High Efficiency",
             "parameters": {
@@ -51,6 +190,16 @@ class H265Compressor:
                 "codec": "aac",
                 "bitrate": "192k",
                 "sample_rate": 48000
+            },
+            "use_hwaccel": False,
+            # optimization_params used by golden_search (but scoring is custom now)
+            "optimization_params": {
+                "crf_min": 20,
+                "crf_max": 40,
+                "vmaf_threshold": 85,
+                "w_c": 0.8,
+                "w_vmaf": 0.2,
+                "soft_threshold_margin": 5.0
             }
         }
         if config_path.exists():
@@ -86,19 +235,22 @@ class H265Compressor:
             pass
         return {}
 
-    def _choose_encoder_for_extension(self, ext: str, detected_codec: str=None) -> List[str]:
-        """Choose a container-compatible encoder flag list based on extension."""
+    def _choose_encoder_for_extension(self, ext: str, detected_codec: Optional[str] = None) -> List[str]:
+        """
+        Choose encoder priorities by extension. For .avi we ensure libx264 (H.264) is chosen.
+        detected_codec handling for VP/AV1 remains.
+        """
         ext = ext.lstrip('.').lower()
-        # Mapping: extension -> preferred encoder
         mapping = {
             'webm': ['libvpx-vp9', 'libaom-av1', 'libvpx-vp8'],
             'mkv': ['libx265', 'libx264'],
             'mp4': ['libx265', 'libx264'],
             'mov': ['libx265', 'libx264'],
-            'avi': ['mpeg4', 'libx264']
+            # Important: use H.264 when .avi (user requested)
+            'avi': ['libx264', 'mpeg4']
         }
         candidates = mapping.get(ext, ['libx265', 'libx264'])
-        # If input is already vp9/vp8/av1 prefer same family
+        # If the detected codec is a specialized codec prefer corresponding encoders
         if detected_codec in ('vp9', 'vp8', 'av1'):
             if detected_codec == 'vp9':
                 return ['libvpx-vp9']
@@ -106,10 +258,9 @@ class H265Compressor:
                 return ['libvpx-vp8']
             if detected_codec == 'av1':
                 return ['libaom-av1']
-        # return first candidate as chosen encoder
         return [candidates[0]]
 
-    def _detect_stream_codecs(self, info: Dict[str, Any]) -> Dict[str, str]:
+    def _detect_stream_codecs(self, info: Dict[str, Any]) -> Dict[str, Optional[str]]:
         ret = {'video': None, 'audio': None}
         try:
             for s in info.get('streams', []):
@@ -120,6 +271,12 @@ class H265Compressor:
         except Exception:
             pass
         return ret
+
+    def _get_primary_video_stream(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        for s in info.get('streams', []):
+            if s.get('codec_type') == 'video':
+                return s
+        return {}
 
     def _build_x265_params(self, params: Dict[str, Any]) -> str:
         x265_params = []
@@ -144,68 +301,108 @@ class H265Compressor:
 
         info = self._get_video_info(input_video)
         streams = self._detect_stream_codecs(info)
+        video_stream = self._get_primary_video_stream(info)
 
-        input_ext = Path(input_video).suffix.lower()
+        input_ext = Path(input_video).suffix.lstrip('.').lower()
         chosen_encoders = self._choose_encoder_for_extension(input_ext, detected_codec=streams.get('video'))
         chosen_video_encoder = chosen_encoders[0]
 
+        # ASSUMPTION: all inputs are 8-bit yuv420p per user instruction
+        pix_fmt = 'yuv420p'
+
         # Decide audio flags
         audio_flags = []
-        if input_ext == '.webm':
-            # Keep Opus when present; otherwise transcode to libopus
-            if streams.get('audio') == 'opus' or streams.get('audio') is None:
-                audio_flags = ['-c:a', 'libopus', '-b:a', audio_params.get('bitrate', '128k')]
+        if input_ext == 'webm':
+            if streams.get('audio') == 'opus':
+                audio_flags = ['-c:a', 'copy']
             else:
-                # transcode other audio to libopus for webm
                 audio_flags = ['-c:a', 'libopus', '-b:a', audio_params.get('bitrate', '128k')]
         else:
-            # For mp4/mkv/mov/avi use AAC as default with safe sample rate and channels
             if streams.get('audio') == 'opus':
                 audio_flags = ['-c:a', 'aac', '-b:a', audio_params.get('bitrate', '192k'), '-ar', '48000', '-ac', '2']
             else:
                 audio_flags = ['-c:a', audio_params.get('codec', 'aac'), '-b:a', audio_params.get('bitrate', '192k'), '-ar', str(audio_params.get('sample_rate', 48000))]
 
-        # Decide pixel format
-        pix_fmt = 'yuv420p'
-
         # Encoder-specific extra params
-        video_encode_flags = []
-        if chosen_video_encoder in ('libx265',):
+        video_encode_flags: List[str] = []
+        if chosen_video_encoder == 'libx265':
             video_encode_flags = ['-c:v', 'libx265', '-preset', str(params.get('preset', 'slow')), '-crf', str(params.get('crf', 22)), '-profile:v', params.get('profile', 'main'), '-level', params.get('level', '4.1'), '-x265-params', self._build_x265_params(params)]
+        elif chosen_video_encoder == 'libx264':
+            # Provide sane defaults for libx264
+            video_encode_flags = ['-c:v', 'libx264', '-preset', str(params.get('preset', 'slow')), '-crf', str(params.get('crf', 22)), '-profile:v', params.get('profile', 'high')]
         elif chosen_video_encoder == 'libvpx-vp9':
-            # high-quality VP9 settings
             video_encode_flags = ['-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', str(params.get('crf', 22)), '-threads', str(params.get('threads', 0)), '-tile-columns', str(params.get('tile_columns', 2)), '-g', '240', '-aq-mode', '0']
         elif chosen_video_encoder == 'libvpx-vp8':
             video_encode_flags = ['-c:v', 'libvpx', '-b:v', '0', '-crf', str(params.get('crf', 22))]
         elif chosen_video_encoder == 'libaom-av1':
             video_encode_flags = ['-c:v', 'libaom-av1', '-crf', str(params.get('crf', 22)), '-b:v', '0', '-cpu-used', '2']
         else:
-            # fallback
             video_encode_flags = ['-c:v', chosen_video_encoder]
 
-        # Probing & analyze settings to avoid mis-detection on Linux
-        probe_flags = ['-probesize', '100M', '-analyzeduration', '100M']
-        hwaccel_flags = ['-hwaccel', 'auto']
+        # Probing flags
+        probe_flags = ['-probesize', '50M', '-analyzeduration', '50M']
+        hwaccel_flags = []
+        if self.config.get('use_hwaccel'):
+            hwaccel_flags = ['-hwaccel', 'auto']
 
         cmd = ['ffmpeg', '-y'] + probe_flags + hwaccel_flags + ['-i', input_video] + video_encode_flags + ['-pix_fmt', pix_fmt] + audio_flags + [output_video]
 
-        # tuning
         tune = params.get('tune', 'none')
         if tune and tune != 'none' and '-x265-params' in ' '.join(video_encode_flags):
             cmd.extend(['-tune', tune])
 
         return cmd
-    
+
     def _compute_vmaf(self, ref_video: str, dist_video: str) -> float:
-        """Compute VMAF score using robust ffmpeg/libvmaf command from matrix.py."""
-        print(f"[VMAF] Starting VMAF calculation...")
-        import subprocess, tempfile, os
-        from pathlib import Path
+        """
+        Primary VMAF computation entry point: attempt fast sampled aligned VMAF,
+        if that fails fallback to robust JSON-based ffmpeg/libvmaf pipeline.
+        """
+        print(f"[VMAF] Starting fast aligned VMAF calculation...")
         try:
-            vmaf_log = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
-            vmaf_log.close()
-            log_path = str(Path(vmaf_log.name).resolve())
-            lavfi = f"[0:v][1:v]libvmaf=log_fmt=json:log_path={log_path}"
+            score = vmaf_mean_aligned_fast(ref_video, dist_video)
+            print(f"[VMAF] Fast VMAF result: {score:.3f}")
+            return score
+        except Exception as e:
+            print(f"[VMAF] Fast VMAF failed: {e}. Falling back to robust method...")
+            return self._compute_vmaf_fallback(ref_video, dist_video)
+
+    def _compute_vmaf_fallback(self, ref_video: str, dist_video: str) -> float:
+        """Robust JSON-based ffmpeg/libvmaf pipeline (previous default)."""
+        print(f"[VMAF] Starting VMAF fallback calculation...")
+        try:
+            ref_info = self._get_video_info(ref_video)
+            ref_stream = self._get_primary_video_stream(ref_info)
+            if not ref_stream:
+                print("[VMAF] Could not read reference stream info; skipping VMAF")
+                return 0.0
+
+            w = int(ref_stream.get('width', 0) or 0)
+            h = int(ref_stream.get('height', 0) or 0)
+            rfr = ref_stream.get('r_frame_rate') or ref_stream.get('avg_frame_rate') or '0/1'
+            try:
+                fps = float(Fraction(rfr))
+            except Exception:
+                fps = 0.0
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as vmaf_log:
+                log_path = vmaf_log.name
+
+            scale_filter = ''
+            if w > 0 and h > 0:
+                scale_filter = f"scale={w}:{h}:flags=bicubic,"
+
+            fps_filter = ''
+            if fps > 0:
+                fps_filter = f"fps=fps={fps},"
+
+            # Force format to yuv420p for VMAF computation (inputs are 8-bit)
+            lavfi = (
+                f"[0:v]setpts=PTS-STARTPTS,{scale_filter}{fps_filter}format=yuv420p[ref];"
+                f"[1:v]setpts=PTS-STARTPTS,{scale_filter}{fps_filter}format=yuv420p[dist];"
+                f"[ref][dist]libvmaf=log_fmt=json:log_path={log_path}"
+            )
+
             cmd = [
                 "ffmpeg",
                 "-hide_banner",
@@ -215,7 +412,8 @@ class H265Compressor:
                 "-lavfi", lavfi,
                 "-f", "null", "-"
             ]
-            print(f"[VMAF] Running: {' '.join(cmd)}")
+
+            print(f"[VMAF] Running fallback ffmpeg/libvmaf (command suppressed)...")
             proc = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -226,7 +424,7 @@ class H265Compressor:
                 timeout=1200,
                 check=False
             )
-            print(f"[VMAF] ffmpeg exitcode={proc.returncode}")
+
             if Path(log_path).exists() and Path(log_path).stat().st_size > 10:
                 try:
                     with open(log_path, "r") as f:
@@ -236,96 +434,119 @@ class H265Compressor:
                         vmaf_scores = [float(frame.get('metrics', {}).get('vmaf', 0)) for frame in frames if 'vmaf' in frame.get('metrics', {})]
                         if vmaf_scores:
                             score = sum(vmaf_scores) / len(vmaf_scores)
-                            print(f"[VMAF] Parsed JSON VMAF: {score:.3f} (using {log_path})")
+                            print(f"[VMAF] Parsed JSON VMAF (fallback): {score:.3f} (using {log_path})")
                             return score
                 except Exception as e:
-                    print(f"[VMAF] JSON parse error: {e}")
-            print(f"[VMAF] Full ffmpeg stderr:\n{proc.stderr}")
-            print(f"[VMAF] All VMAF calculation methods failed.")
+                    print(f"[VMAF] JSON parse error in fallback: {e}")
+
+            print(f"[VMAF] ffmpeg exitcode={proc.returncode}")
+            print(f"[VMAF] ffmpeg stderr (last 2000 chars):\n{(proc.stderr or '')[-2000:]}")
+            print(f"[VMAF] VMAF fallback calculation failed or returned no frames.")
             return 0.0
         finally:
             try:
-                if Path(vmaf_log.name).exists():
-                    Path(vmaf_log.name).unlink()
+                if 'log_path' in locals() and Path(log_path).exists():
+                    Path(log_path).unlink()
             except Exception:
                 pass
 
-    def _score_crf(self, input_video: str, crf: int) -> tuple:
-        """Encode with CRF, compute Sf score, return (Sf, output_file)."""
-        params = self.config.get("parameters", {})
+    def _score_crf(self, input_video: str, crf: int) -> Tuple[float, Optional[str]]:
+        """
+        Encode with CRF, compute the new golden-search score:
+            compression = initial_size / final_size
+            score = 0.7 * compression + 0.3 * vmaf
+        Higher score is better.
+        Returns (score, output_file_path) or (-inf, None) on failure.
+        """
+        params = dict(self.config.get("parameters", {}))
         params["crf"] = crf
 
         tmp_output = Path(tempfile.gettempdir()) / f"tmp_crf{crf}{Path(input_video).suffix}"
         if tmp_output.exists():
-            tmp_output.unlink()
+            try:
+                tmp_output.unlink()
+            except Exception:
+                pass
 
-        cmd = self._build_ffmpeg_command(input_video, str(tmp_output))
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        saved_config = dict(self.config)
+        try:
+            self.config = dict(self.config)
+            self.config['parameters'] = params
 
-        if not tmp_output.exists():
+            cmd = self._build_ffmpeg_command(input_video, str(tmp_output))
+            print(f"[SCORE] Encoding with CRF={crf} -> {' '.join(cmd[:6])} ...")
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+            if proc.returncode != 0:
+                print(f"[SCORE] ffmpeg failed for CRF={crf} rc={proc.returncode}")
+                print((proc.stderr or '')[-1000:])
+                return -1e9, None
+
+            if not tmp_output.exists():
+                return -1e9, None
+
+            orig_size = os.path.getsize(input_video)
+            comp_size = os.path.getsize(tmp_output)
+
+            # Per user request: compression = initial_size / final_size
+            if comp_size > 0:
+                compression = orig_size / comp_size
+            else:
+                compression = 0.0
+
+            vmaf = self._compute_vmaf(input_video, str(tmp_output))
+
+            # New scoring formula: score = 0.7 * compression + 0.3 * vmaf
+            score = 0.7 * compression + 0.3 * vmaf
+
+            print(f"[TEST] CRF={crf}, Orig={orig_size} bytes, Comp={comp_size} bytes, Compression={compression:.6f}, VMAF={vmaf:.2f}, Score={score:.6f}")
+            return score, str(tmp_output)
+        except subprocess.TimeoutExpired:
+            print(f"[SCORE] CRF={crf} encoding timed out")
             return -1e9, None
+        except Exception as e:
+            print(f"[SCORE] Exception for CRF={crf}: {e}")
+            return -1e9, None
+        finally:
+            self.config = saved_config
 
-        orig_size = os.path.getsize(input_video)
-        comp_size = os.path.getsize(tmp_output)
-        c = comp_size / orig_size
-
-        vmaf = self._compute_vmaf(input_video, str(tmp_output))
-
-        opt_params = self.config.get("optimization_params", {})
-        vmaf_thr = opt_params.get("vmaf_threshold", 85)
-        w_c = opt_params.get("w_c", 0.8)
-        w_vmaf = opt_params.get("w_vmaf", 0.2)
-
-        sf = w_c * (1 - c ** 1.5) + w_vmaf * ((vmaf - vmaf_thr) / (100 - vmaf_thr))
-
-        print(f"[TEST] CRF={crf}, Size={comp_size/1024/1024:.2f}MB, VMAF={vmaf:.2f}, Sf={sf:.4f}")
-
-        return sf, str(tmp_output)
-
-    def golden_search(self, input_video: str) -> tuple:
-        """Perform golden-section search to maximize Sf, using ThreadPoolExecutor for parallel scoring."""
+    def golden_search(self, input_video: str) -> Tuple[int, Optional[str], float]:
         opt_params = self.config.get("optimization_params", {})
         a = opt_params.get("crf_min", 20)
         b = opt_params.get("crf_max", 40)
 
         phi = (math.sqrt(5) - 1) / 2
-        tol = 1  # stop when CRF interval is <= 1
+        tol = 1  # stop when CRF interval <= 1
 
         x1 = int(b - phi * (b - a))
         x2 = int(a + phi * (b - a))
 
         print(f"[GOLDEN] Starting parallel scoring for CRF {x1} and {x2}")
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future1 = executor.submit(self._score_crf, input_video, x1)
-            future2 = executor.submit(self._score_crf, input_video, x2)
-            results = []
-            for future in as_completed([future1, future2]):
-                results.append(future.result())
-        # Ensure results are in order x1, x2
-        if future1.done():
-            f1, out1 = results[0]
-            f2, out2 = results[1]
-        else:
-            f1, out1 = results[1]
-            f2, out2 = results[0]
+            future_map = {executor.submit(self._score_crf, input_video, x): x for x in (x1, x2)}
+            results_map = {}
+            for future in as_completed(future_map):
+                crf = future_map[future]
+                score, outfile = future.result()
+                results_map[crf] = (score, outfile)
+
+        f1, out1 = results_map.get(x1, (-1e9, None))
+        f2, out2 = results_map.get(x2, (-1e9, None))
 
         while abs(b - a) > tol:
             print(f"[GOLDEN] Interval: [{a}, {b}] | CRFs: {x1}, {x2}")
             if f1 > f2:
+                # drop right
                 b, f2, out2, x2 = x2, f1, out1, x1
                 x1 = int(b - phi * (b - a))
-                print(f"[GOLDEN] Parallel scoring for CRF {x1}")
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future1 = executor.submit(self._score_crf, input_video, x1)
-                    f1, out1 = future1.result()
+                print(f"[GOLDEN] Scoring CRF {x1}")
+                f1, out1 = self._score_crf(input_video, x1)
             else:
+                # drop left
                 a, f1, out1, x1 = x1, f2, out2, x2
                 x2 = int(a + phi * (b - a))
-                print(f"[GOLDEN] Parallel scoring for CRF {x2}")
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future2 = executor.submit(self._score_crf, input_video, x2)
-                    f2, out2 = future2.result()
+                print(f"[GOLDEN] Scoring CRF {x2}")
+                f2, out2 = self._score_crf(input_video, x2)
 
         if f1 > f2:
             return x1, out1, f1
@@ -353,7 +574,10 @@ class H265Compressor:
         info = self._get_video_info(input_video)
         if info:
             fmt = info.get('format', {})
-            print(f"[STEP] Input size {int(fmt.get('size',0))/(1024*1024):.1f} MB, duration {float(fmt.get('duration',0)):.1f}s")
+            try:
+                print(f"[STEP] Input size {int(fmt.get('size',0))/(1024*1024):.1f} MB, duration {float(fmt.get('duration',0)):.1f}s")
+            except Exception:
+                pass
 
         cmd = self._build_ffmpeg_command(input_video, output_video)
         print(f"[STEP] FFmpeg command: {' '.join(cmd)}")
@@ -377,9 +601,7 @@ class H265Compressor:
                 return True
             else:
                 print(f"[STEP] FFmpeg failed (rc={result.returncode})")
-                err_lines = (result.stderr or '').strip().split(' ')
-                for line in err_lines[-30:]:
-                    print(line)
+                print((result.stderr or '')[-2000:])
                 return False
         except subprocess.TimeoutExpired:
             print("[STEP] Compression timed out")
@@ -390,7 +612,7 @@ class H265Compressor:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Linux-ready H.265/HEVC Video Compressor with Golden Search')
+    parser = argparse.ArgumentParser(description='Linux-ready H.265/HEVC Video Compressor with Golden Search (modified)')
     parser.add_argument('--input', required=True, help='Input video file')
     parser.add_argument('--output', required=True, help='Output video file (extension preserved to match input)')
     parser.add_argument('--config', default='config.json', help='Path to config file')
@@ -399,12 +621,20 @@ def main():
     compressor = H265Compressor(args.config)
     best_crf, best_file, best_sf = compressor.golden_search(args.input)
 
-    # Copy best file to final output
-    shutil.move(best_file, args.output)
+    if not best_file:
+        print("[RESULT] No valid output produced by golden search.")
+        sys.exit(2)
 
-    print(f"\n[RESULT] Best CRF={best_crf}, Sf={best_sf:.4f}")
-    print(f"[OUTPUT] Final compressed video: {args.output}")
+    final_output = args.output
+    input_ext = Path(args.input).suffix
+    if not final_output.endswith(input_ext):
+        final_output = str(Path(final_output).with_suffix(input_ext))
+
+    shutil.move(best_file, final_output)
+
+    print(f"\n[RESULT] Best CRF={best_crf}, Score={best_sf:.6f}")
+    print(f"[OUTPUT] Final compressed video: {final_output}")
+
 
 if __name__ == '__main__':
     main()
-
